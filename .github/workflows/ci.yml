@@ -28,7 +28,11 @@ jobs:
 
       - name: Python Syntax & Compilation Verification
         run: |
-          python -m py_compile cli.py translate_batch.py core/*.py gui/*.py
+          python -m py_compile cli.py translate_batch.py doctor.py core/*.py gui/*.py
+
+      - name: Subsystem Doctor & Diagnostics
+        run: |
+          python doctor.py
 
       - name: Import Core Modules Test
         run: |
