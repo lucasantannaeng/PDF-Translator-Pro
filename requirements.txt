@@ -1,0 +1,10 @@
+pdf2zh>=1.9.11
+streamlit>=1.62.0
+rich>=15.0.0
+pyyaml>=6.0.3
+openai>=3.3.1
+google-genai>=2.19.0
+pymupdf>=1.25.2
+python-dotenv>=1.2.3
+tqdm>=4.70.0
+pydantic>=2.13.4

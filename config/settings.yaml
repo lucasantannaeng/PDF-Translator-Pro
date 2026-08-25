@@ -1,0 +1,86 @@
+# ==============================================================================
+# PDF-Translator-Pro - Enterprise Configuration
+# ==============================================================================
+
+app:
+  name: "PDF-Translator-Pro"
+  version: "1.1.0"
+  description: "Enterprise PDF Layout-Preserving Translation Suite with FreeLLM & AI Engines"
+
+translation:
+  source_lang: "en"
+  target_lang: "pt"          # pt = Brazilian Portuguese
+  target_lang_display: "Português (Brasil)"
+  default_provider: "freellm" # Default is FreeLLM (100% Free & Local)
+  default_model: "gemini-3.6-flash" # or auto, minimax-m3
+  concurrency: 2             # Concurrency for local proxy
+  output_format: "both"      # Options: mono (translated only), dual (bilingual), both
+  preserve_math: true        # Keeps math formulas, symbols, and formatting intact
+  chunk_size_pages: 50
+
+providers:
+  freellm:
+    base_url: "http://127.0.0.1:31415/v1"
+    env_key: "FREELLM_API_KEY"
+    models:
+      - id: "gemini-3.6-flash"
+        name: "FreeLLM - Gemini 3.6 Flash (100% Grátis | 1M Context)"
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+      - id: "auto"
+        name: "FreeLLM - Auto Router (Seleciona o melhor modelo livre)"
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+      - id: "gemini-3.5-flash"
+        name: "FreeLLM - Gemini 3.5 Flash"
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+      - id: "minimax-m3"
+        name: "FreeLLM - MiniMax M3 (Alta Fidelidade)"
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+      - id: "qwen3-coder-480b"
+        name: "FreeLLM - Qwen 3 Coder 480B"
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+    env_key: "OPENROUTER_API_KEY"
+    models:
+      - id: "deepseek/deepseek-chat"
+        name: "DeepSeek V3 (OpenRouter)"
+        cost_per_1k_input: 0.00014
+        cost_per_1k_output: 0.00028
+      - id: "google/gemini-2.5-flash"
+        name: "Gemini 2.5 Flash (OpenRouter)"
+        cost_per_1k_input: 0.000075
+        cost_per_1k_output: 0.0003
+
+  deepseek:
+    base_url: "https://api.deepseek.com/v1"
+    env_key: "DEEPSEEK_API_KEY"
+    models:
+      - id: "deepseek-chat"
+        name: "DeepSeek-V3 Official Direct"
+        cost_per_1k_input: 0.00014
+        cost_per_1k_output: 0.00028
+
+  groq:
+    base_url: "https://api.groq.com/openai/v1"
+    env_key: "GROQ_API_KEY"
+    models:
+      - id: "qwen/qwen3.6-27b"
+        name: "Groq - Qwen 3.6 27B"
+        cost_per_1k_input: 0.0002
+        cost_per_1k_output: 0.0002
+
+paths:
+  input_dir: "input_pdfs"
+  output_dir: "output_translated"
+  logs_dir: "logs"
+  temp_dir: "temp"
+  glossaries_dir: "config/glossaries"
+
+domain:
+  active_glossary: "aviation"
