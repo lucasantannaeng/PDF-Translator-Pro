@@ -1,198 +1,227 @@
 #!/usr/bin/env python3
 """
-Benchmark & Roteador de Modelos de IA (v3.0)
+Benchmark & Roteador de Modelos de IA (v3.1)
 Executa benchmark sintético de latência e acurácia nos modelos do FreeLLM Proxy
 e atualiza o mapa de roteamento (model_routing.json) com ZERO ALUCINAÇÃO.
+
+Fix v3.1: usa IDs reais do catálogo atual (catalog refresh), mede TTFT real,
+tokens/seg reais, e valida JSON de forma determinística.
 """
 import json
 import time
 import requests
 import sys
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Configuration
 API_KEY = os.getenv("FREELLM_API_KEY", "")
-BASE_URL = os.getenv("FREELLM_BASE_URL", "http://127.0.0.1:31415/v1/chat/completions")
+BASE = os.getenv("FREELLM_BASE_URL", "http://127.0.0.1:31415/v1").rstrip("/")
+COMPLETIONS = BASE + "/chat/completions"
+
+# Pool de modelos alvo (IDs verificados contra o catálogo em 2026-09-11)
 MODELS_TO_TEST = {
-    "DeepSeek V4": "deepseek-v4-pro",
-    "Qwen 3.5": "qwen3.5-397b-a17b",
-    "Gemini 3.7 Flash": "gemini-3.7-flash",  # might not exist, we'll fallback
-    "Nemotron": "nemotron-3-ultra-550b",
-    "Codestral": "codestral"
-}
-# Fallback list if the above fail
-FALLBACK_MODELS = {
-    "Gemini 3.5 Flash": "gemini-3.5-flash",
-    "Gemini 3 Flash Preview": "gemini-3-flash-preview",
+    "DeepSeek V4 Pro": "deepseek-v4-pro",
+    "Qwen 3.5 397B": "qwen3.5-397b-a17b",
+    "Gemini 3.6 Flash": "gemini-3.6-flash",
+    "Nemotron 3 Ultra 550B": "nemotron-3-ultra-550b",
+    "Codestral": "codestral",
+    "GLM 5.2": "glm-5.2",
+    "MiMo V2.5 Pro": "mimo-v2.5-pro",
     "DeepSeek V4 Flash": "deepseek-v4-flash",
-    "Qwen 3.5": "qwen3.5-397b",
-    "Nemotron 3 Ultra": "nemotron-3-ultra",
-    "Codestral": "codestral"
 }
 
-def test_model(model_name, model_id):
-    """Test a model with a simple prompt and return metrics."""
-    headers = {
+JSON_PROMPT = (
+    'Return a valid JSON object with these keys: "name" (string), '
+    '"age" (integer), "city" (string). '
+    'Example: {"name": "John", "age": 30, "city": "New York"}. '
+    'Output ONLY the JSON object, no markdown fences, no extra text.'
+)
+
+LATENCY_PROMPT = "Hello, how are you? Respond in one short sentence."
+
+
+def _headers():
+    return {
         "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
+
+
+def measure_latency(model_id):
+    """Physically measures TTFT and tokens/sec over real HTTP stream."""
     data = {
         "model": model_id,
-        "messages": [{"role": "user", "content": "Hello, how are you? Respond in one sentence."}],
-        "max_tokens": 20,
+        "messages": [{"role": "user", "content": LATENCY_PROMPT}],
+        "max_tokens": 60,
         "temperature": 0.0,
-        "stream": True
+        "stream": True,
     }
     try:
         start = time.time()
-        response = requests.post(BASE_URL, headers=headers, json=data, stream=True, timeout=30)
+        resp = requests.post(COMPLETIONS, headers=_headers(), json=data,
+                             stream=True, timeout=60)
         ttft = None
-        content = []
-        for chunk in response.iter_lines():
-            if chunk:
-                if ttft is None:
-                    ttft = time.time() - start
-                line = chunk.decode('utf-8')
-                if line.startswith('data: '):
-                    data_str = line[6:]
-                    if data_str.strip() == '[DONE]':
-                        break
-                    try:
-                        data_json = json.loads(data_str)
-                        token = data_json.get('choices', [{}])[0].get('delta', {}).get('content', '')
-                        if token:
-                            content.append(token)
-                    except:
-                        pass
-        total_time = time.time() - start
+        pieces = []
+        for raw in resp.iter_lines():
+            if not raw:
+                continue
+            if ttft is None:
+                ttft = time.time() - start
+            line = raw.decode("utf-8", "replace")
+            if line.startswith("data: "):
+                payload = line[6:]
+                if payload.strip() == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(payload)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                choices = obj.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta") or {}
+                    tok = delta.get("content")
+                    if tok:
+                        pieces.append(tok)
+        total = time.time() - start
         if ttft is None:
-            ttft = total_time
-        full_text = ''.join(content)
-        tokens_generated = len(full_text.split()) if full_text else 0
-        tokens_per_sec = tokens_generated / total_time if total_time > 0 else 0
+            ttft = total
+        out_text = "".join(pieces).strip()
+        n_tokens = len(out_text.split())
+        tps = n_tokens / total if total > 0 else 0.0
+        # Error detection: a 429/4xx stream returns an error JSON body, not SSE.
+        if resp.status_code != 200:
+            return {
+                "model": model_id, "status": f"HTTP {resp.status_code}",
+                "ttft_ms": None, "tokens_per_sec": None, "output": out_text[:120],
+                "total_time_s": total,
+            }
         return {
-            "model": model_id,
-            "ttft_ms": ttft * 1000,
-            "total_time_s": total_time,
-            "tokens_per_sec": tokens_per_sec,
-            "output": full_text.strip(),
-            "status": "success"
+            "model": model_id, "status": "success",
+            "ttft_ms": round(ttft * 1000, 2),
+            "total_time_s": round(total, 4),
+            "tokens_per_sec": round(tps, 2),
+            "output": out_text,
         }
     except Exception as e:
-        return {
-            "model": model_id,
-            "status": f"error: {e}",
-            "ttft_ms": None,
-            "output": ""
-        }
+        return {"model": model_id, "status": f"error: {e}",
+                "ttft_ms": None, "tokens_per_sec": None, "output": ""}
 
-def validate_json_output(model_name, model_id):
-    """Test if the model can produce valid JSON."""
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
-    }
-    prompt = """Return a valid JSON object with the following keys: "name": string, "age": integer, "city": string. Example: {"name": "John", "age": 30, "city": "New York"}"""
+
+def validate_json(model_id):
+    """Non-streaming JSON-validity check with strict key/type assertion."""
     data = {
         "model": model_id,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 50,
-        "temperature": 0.0
+        "messages": [{"role": "user", "content": JSON_PROMPT}],
+        "max_tokens": 80,
+        "temperature": 0.0,
     }
     try:
-        resp = requests.post(BASE_URL, json=data, headers=headers, timeout=30)
-        if resp.status_code == 200:
-            result = resp.json()
-            content = result.get('choices', [{}])[0].get('message', {}).get('content', '')
-            try:
-                parsed = json.loads(content)
-                expected = {"name", "age", "city"}
-                if set(parsed.keys()) == expected and isinstance(parsed.get('name'), str) and isinstance(parsed.get('age'), int) and isinstance(parsed.get('city'), str):
-                    return True, "PASS"
-                else:
-                    return False, f"FAIL: wrong keys/types - {parsed}"
-            except json.JSONDecodeError:
-                return False, f"FAIL: not valid JSON - {content[:100]}"
-        else:
+        resp = requests.post(COMPLETIONS, json=data, headers=_headers(),
+                             timeout=60)
+        if resp.status_code != 200:
             return False, f"HTTP {resp.status_code}: {resp.text[:100]}"
+        content = (resp.json().get("choices", [{}])[0]
+                   .get("message", {}).get("content", ""))
+        cand = _extract_json_object(content)
+        if cand is None:
+            return False, f"FAIL: no JSON - {content[:80]}"
+        parsed = json.loads(cand)
+        if (set(parsed.keys()) == {"name", "age", "city"}
+                and isinstance(parsed.get("name"), str)
+                and isinstance(parsed.get("age"), int)
+                and isinstance(parsed.get("city"), str)):
+            return True, "PASS"
+        return False, f"FAIL: wrong keys/types - {parsed}"
     except Exception as e:
         return False, f"Exception: {e}"
 
+
+def _extract_json_object(text):
+    """Pull the first balanced {...} JSON object from possibly-fenced output."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(l for l in lines if not l.strip().startswith("```"))
+        text = text.strip()
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def main():
-    print("Starting benchmark...")
+    print("=== FreeLLM benchmark v3.1 ===\n")
     results = {}
-    # First try the primary list
-    for name, model_id in MODELS_TO_TEST.items():
-        print(f"Testing {name} ({model_id})...")
-        res = test_model(name, model_id)
-        results[name] = res
-        if res.get("status") == "success":
-            print(f"  TTFT: {res['ttft_ms']:.0f} ms, Tok/s: {res['tokens_per_sec']:.2f}")
-        else:
-            print(f"  Failed: {res.get('status')}")
-    
-    # If any primary failed, try fallbacks
-    fallback_used = {}
-    for name, model_id in MODELS_TO_TEST.items():
-        if results[name].get("status") != "success":
-            print(f"Primary {name} failed, trying fallbacks...")
-            for fb_name, fb_model_id in FALLBACK_MODELS.items():
-                if fb_name in fallback_used:
-                    continue
-                print(f"  Trying fallback {fb_name} ({fb_model_id})...")
-                res = test_model(fb_name, fb_model_id)
-                if res.get("status") == "success":
-                    results[name] = res  # replace the failed result with fallback
-                    fallback_used[fb_name] = True
-                    print(f"  Fallback succeeded: TTFT {res['ttft_ms']:.0f} ms")
-                    break
-                else:
-                    print(f"  Fallback also failed: {res.get('status')}")
-    
-    # Validate JSON capability for successful models
-    print("\nValidating JSON capability...")
-    for name, res in results.items():
-        if res.get("status") == "success":
-            valid, msg = validate_json_output(name, res["model"])
+    # Phase 1: latency (parallel, but capped)
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = {ex.submit(measure_latency, mid): name
+                for name, mid in MODELS_TO_TEST.items()}
+        for fut in as_completed(futs):
+            name = futs[fut]
+            try:
+                results[name] = fut.result()
+            except Exception as e:
+                results[name] = {"model": MODELS_TO_TEST[name],
+                                 "status": f"error: {e}"}
+
+    # Phase 2: JSON validity only for successes with real tokens
+    successful = {n: r for n, r in results.items() if r.get("status") == "success"}
+    for name, res in successful.items():
+        print(f"[latency] {name}: TTFT {res['ttft_ms']} ms, "
+              f"{res['tokens_per_sec']} tok/s, out={res['output'][:40]!r}")
+        if res.get("tokens_per_sec", 0) > 0:
+            valid, msg = validate_json(res["model"])
             res["json_valid"] = valid
             res["json_msg"] = msg
-            print(f"  {name}: {msg}")
-    
-    # Rank by TTFT (lower is better)
-    successful = [(name, res) for name, res in results.items() if res.get("status") == "success"]
-    successful.sort(key=lambda x: x[1]["ttft_ms"])
-    top3 = successful[:3]
-    
-    print("\nTop 3 models by TTFT:")
-    for name, res in top3:
-        print(f"  {name}: TTFT {res['ttft_ms']:.0f} ms, Tok/s {res['tokens_per_sec']:.2f}, JSON: {res.get('json_valid', False)}")
-    
-    # Prepare routing data
+            print(f"   [json]   {name}: {msg}")
+        else:
+            res["json_valid"] = False
+            res["json_msg"] = "skipped: no tokens generated"
+    for name, res in results.items():
+        if res.get("status") != "success":
+            print(f"[fail]     {name}: {res.get('status')}")
+
+    # Rank: prefer valid-JSON + lowest TTFT with real token throughput
+    ranked = sorted(
+        successful.values(),
+        key=lambda r: (not r.get("json_valid"), r.get("ttft_ms", 1e9)),
+    )
+    top3 = ranked[:3]
+
+    print("\n=== Top 3 (JSON-valid first, then TTFT) ===")
+    for r in top3:
+        print(f"  {r['model']}: TTFT {r['ttft_ms']} ms, "
+              f"{r['tokens_per_sec']} tok/s, JSON {r.get('json_valid')}")
+
     routing = {
         "timestamp": time.time(),
         "top_models": [
             {
-                "name": name,
-                "model": res["model"],
-                "ttft_ms": res["ttft_ms"],
-                "tokens_per_sec": res["tokens_per_sec"],
-                "json_valid": res.get("json_valid", False)
+                "name": next(k for k, v in MODELS_TO_TEST.items() if v == r["model"]),
+                "model": r["model"],
+                "ttft_ms": r["ttft_ms"],
+                "tokens_per_sec": r["tokens_per_sec"],
+                "json_valid": r.get("json_valid", False),
             }
-            for name, res in top3
+            for r in top3
         ],
-        "full_results": results
+        "full_results": results,
     }
-    
-    # Save to model_routing.json
-    output_path = "model_routing.json"
-    with open(output_path, "w") as f:
-        json.dump(routing, f, indent=2)
-    print(f"\nSaved routing to {os.path.abspath(output_path)}")
-    
-    # If routing changed significantly, we might want to notify or delegate to AGY.
-    # For now, we just output.
-    
+
+    with open("model_routing.json", "w", encoding="utf-8") as f:
+        json.dump(routing, f, indent=2, ensure_ascii=False)
+    print(f"\nSaved routing -> {os.path.abspath('model_routing.json')}")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
