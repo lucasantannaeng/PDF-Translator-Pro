@@ -14,20 +14,23 @@ import sys
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-API_KEY = os.getenv("FREELLM_API_KEY", "")
+API_KEY = (
+    os.getenv("FREELLM_API_KEY")
+    or os.getenv("FREE_LLM_API_KEY")
+    or "freellmapi-2bdbaa3fee7be5366b3d10ba65eb8820a097567b4e097980"
+)
 BASE = os.getenv("FREELLM_BASE_URL", "http://127.0.0.1:31415/v1").rstrip("/")
 COMPLETIONS = BASE + "/chat/completions"
 
-# Pool de modelos alvo (IDs verificados contra o catálogo em 2026-09-11)
+# Pool de modelos alvo (IDs verificados contra o catálogo ativo em 2026-10-02)
 MODELS_TO_TEST = {
-    "DeepSeek V4 Pro": "deepseek-v4-pro",
-    "Qwen 3.5 397B": "qwen3.5-397b-a17b",
-    "Gemini 3.6 Flash": "gemini-3.6-flash",
-    "Nemotron 3 Ultra 550B": "nemotron-3-ultra-550b",
     "Codestral": "codestral",
-    "GLM 5.2": "glm-5.2",
-    "MiMo V2.5 Pro": "mimo-v2.5-pro",
-    "DeepSeek V4 Flash": "deepseek-v4-flash",
+    "Gemini 3.8 Flash": "gemini-3.8-flash",
+    "Gemini 3.7 Flash": "gemini-3.7-flash",
+    "MiniMax M2.7": "minimax-m2.7",
+    "Nemotron 3 Ultra 550B": "nemotron-3-ultra-550b",
+    "Fusion": "fusion",
+    "Auto Router": "auto",
 }
 
 JSON_PROMPT = (
